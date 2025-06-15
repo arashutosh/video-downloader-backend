@@ -1,2 +1,4 @@
 .env
 venv/
+youtube_cookies.txt
+.DS_Store
