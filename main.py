@@ -46,7 +46,8 @@ def create_progress_hook(download_id):
         try:
             if d['status'] == 'downloading':
                 # Only update progress when merging is happening
-                if 'postprocess' in d.get('_downloader', {}).__dict__:
+                downloader = d.get('_downloader', {})
+                if isinstance(downloader, dict) and 'postprocess' in downloader:
                     download_progress[download_id] = {
                         'status': 'merging',
                         'percent': 50,  # Start at 50% since download is complete
@@ -112,11 +113,54 @@ async def download_video(request: DownloadRequest):
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'cookiefile': 'youtube_cookies.txt'
+            'cookiefile': 'youtube_cookies.txt',
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls'],
+                }
+            },
+            'format_sort': ['res:1080', 'ext:mp4:m4a'],
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+            'socket_timeout': 30,
+            'retries': 10,
+            'fragment_retries': 10,
+            'file_access_retries': 10,
+            'extractor_retries': 10,
+            'ignoreerrors': True,
+            'no_color': True,
+            'geo_bypass': True,
+            'geo_verification_proxy': None,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
+            'age_limit': 99,  # Try to bypass age restriction
+            'extractor_retries': 5,
+            'skip_download': True,  # We only need the info
+            'nocheckcertificate': True,
+            'prefer_insecure': True,
+            'allow_unplayable_formats': False,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(request.url, download=False)
+            try:
+                info = ydl.extract_info(request.url, download=False)
+                if info is None:
+                    raise HTTPException(status_code=400, detail="Could not extract video information. The video might be private, age-restricted, or not available.")
+            except Exception as e:
+                error_msg = str(e)
+                if "Sign in to confirm you're not a bot" in error_msg:
+                    raise HTTPException(status_code=403, detail="YouTube requires verification. Please try again later or use a different video.")
+                elif "Video unavailable" in error_msg:
+                    raise HTTPException(status_code=404, detail="Video is unavailable. It might be private, deleted, or region-restricted.")
+                else:
+                    raise HTTPException(status_code=500, detail=f"Error extracting video info: {error_msg}")
 
             formats = []
             playable_url = None
@@ -127,8 +171,12 @@ async def download_video(request: DownloadRequest):
 
             # Get all available formats
             for f in info.get('formats', []):
-                # Include formats that have video
-                if f.get('vcodec') != 'none':
+                # Only include formats that have video (not just audio)
+                if f.get('vcodec') != 'none' and f.get('vcodec') is not None:
+                    # Skip storyboard formats (thumbnails)
+                    if 'storyboard' in f.get('format_note', '').lower():
+                        continue
+                        
                     format_info = {
                         'quality': f.get('format_note', 'unknown'),
                         'url': f.get('url'),
@@ -137,19 +185,26 @@ async def download_video(request: DownloadRequest):
                         'filesize': f.get('filesize', 0),
                         'hasAudio': f.get('acodec') != 'none',
                         'format_id': f.get('format_id', ''),
-                        'video_id': info.get('id', 'unknown')  # Add video ID for progress tracking
+                        'video_id': info.get('id', 'unknown'),  # Add video ID for progress tracking
+                        'isComplete': f.get('acodec') != 'none' and f.get('vcodec') != 'none'
                     }
                     formats.append(format_info)
+                    # Prefer formats that already have audio
                     if not playable_url and f.get('ext') == 'mp4' and f.get('acodec') != 'none':
                         playable_url = f.get('url')
 
+            if not formats:
+                raise HTTPException(status_code=400, detail="No downloadable formats found for this video.")
+
             print("\nProcessed formats being sent to frontend:")
             for f in formats:
-                print(f"Format: {f['quality']} - Resolution: {f['resolution']} - Has Audio: {f['hasAudio']}")
+                print(f"Format: {f['quality']} - Resolution: {f['resolution']} - Has Audio: {f['hasAudio']} - Complete: {f['isComplete']}")
 
-            # Sort formats by resolution (highest first)
+            # Sort formats by: 1) Complete formats first, 2) Resolution (highest first), 3) Has audio
             formats.sort(key=lambda x: (
-                int(x['resolution'].split('x')[1]) if 'x' in x['resolution'] else 0
+                not x['isComplete'],  # Complete formats first
+                int(x['resolution'].split('x')[1]) if 'x' in x['resolution'] else 0,
+                not x['hasAudio']  # Formats with audio come first
             ), reverse=True)
 
             print("\nFinal sorted formats:")
@@ -169,6 +224,8 @@ async def download_video(request: DownloadRequest):
                 'playable_url': playable_url,
                 'video_id': info.get('id', 'unknown')
             }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -224,8 +281,8 @@ def download_with_progress(url, format_id, output_filename, download_id):
         download_progress[download_id] = {'status': 'starting', 'percent': 0}
         
         ydl_opts = {
-            'format': f'{format_id}+bestaudio/best',
-            'outtmpl': output_filename,
+            'format': f'{format_id}+bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best',
+            'outtmpl': output_filename.replace('.mp4', ''),
             'merge_output_format': 'mp4',
             'quiet': False,  # Enable some output for debugging
             'no_warnings': False,
@@ -233,6 +290,35 @@ def download_with_progress(url, format_id, output_filename, download_id):
             'progress_hooks': [create_progress_hook(download_id)],
             'writesubtitles': False,
             'writeautomaticsub': False,
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls'],
+                }
+            },
+            'format_sort': ['res:1080', 'ext:mp4:m4a'],
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
+            'socket_timeout': 30,
+            'retries': 10,
+            'fragment_retries': 10,
+            'file_access_retries': 10,
+            'extractor_retries': 10,
+            'ignoreerrors': True,
+            'no_color': True,
+            'geo_bypass': True,
+            'geo_verification_proxy': None,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-us,en;q=0.5',
+                'Sec-Fetch-Mode': 'navigate',
+            },
+            'age_limit': 99,  # Try to bypass age restriction
+            'nocheckcertificate': True,
+            'prefer_insecure': True,
+            'allow_unplayable_formats': False,
         }
 
         print(f"Starting download for {download_id}")
@@ -260,7 +346,10 @@ async def merge_download(url: str = Query(...), format_id: str = Query(...), dow
         # Use provided download_id or create a new one
         if not download_id:
             download_id = str(uuid.uuid4())
-        output_filename = f"merged_{download_id}.mp4"
+        
+        # yt-dlp will add the extension automatically, so we don't include it in the template
+        output_template = f"merged_{download_id}"
+        output_filename = f"{output_template}.mp4"
 
         # Start download in background thread
         download_thread = threading.Thread(
@@ -283,15 +372,29 @@ async def merge_download(url: str = Query(...), format_id: str = Query(...), dow
         if final_progress.get('status') == 'error':
             raise HTTPException(status_code=500, detail=final_progress.get('error', 'Download failed'))
 
-        if not os.path.exists(output_filename):
+        # Look for the downloaded file (yt-dlp might have added a different extension)
+        possible_files = [
+            output_filename,
+            f"{output_template}.mp4",
+            f"{output_template}.mkv",
+            f"{output_template}.webm"
+        ]
+        
+        downloaded_file = None
+        for file_path in possible_files:
+            if os.path.exists(file_path):
+                downloaded_file = file_path
+                break
+
+        if not downloaded_file:
             raise HTTPException(status_code=500, detail="Downloaded file not found")
 
-        file_size = os.path.getsize(output_filename)
+        file_size = os.path.getsize(downloaded_file)
         headers = {"Content-Length": str(file_size)}
 
         def iterfile():
             try:
-                with open(output_filename, "rb") as f:
+                with open(downloaded_file, "rb") as f:
                     while True:
                         chunk = f.read(1024 * 1024)  # 1MB chunks
                         if not chunk:
@@ -299,9 +402,9 @@ async def merge_download(url: str = Query(...), format_id: str = Query(...), dow
                         yield chunk
             finally:
                 # Clean up the file after streaming
-                if os.path.exists(output_filename):
+                if os.path.exists(downloaded_file):
                     try:
-                        os.remove(output_filename)
+                        os.remove(downloaded_file)
                     except:
                         pass
                 # Clean up progress tracking
@@ -314,9 +417,9 @@ async def merge_download(url: str = Query(...), format_id: str = Query(...), dow
         # Clean up on error
         if 'download_id' in locals() and download_id in download_progress:
             del download_progress[download_id]
-        if 'output_filename' in locals() and os.path.exists(output_filename):
+        if 'downloaded_file' in locals() and os.path.exists(downloaded_file):
             try:
-                os.remove(output_filename)
+                os.remove(downloaded_file)
             except:
                 pass
         raise HTTPException(status_code=500, detail=str(e))
