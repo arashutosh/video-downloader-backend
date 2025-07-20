@@ -111,9 +111,9 @@ async def download_video(request: DownloadRequest):
             raise HTTPException(status_code=400, detail="URL is required")
 
         ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'cookiefile': 'youtube_cookies.txt',
+            'quiet': False,  # Enable verbose output for debugging
+            'no_warnings': False,  # Show warnings for debugging
+            # 'cookiefile': 'youtube_cookies.txt',  # Comment out cookies for now
             'extractor_args': {
                 'youtube': {
                     'skip': ['dash', 'hls'],
@@ -125,23 +125,30 @@ async def download_video(request: DownloadRequest):
                 'key': 'FFmpegVideoConvertor',
                 'preferedformat': 'mp4',
             }],
-            'socket_timeout': 30,
-            'retries': 10,
-            'fragment_retries': 10,
-            'file_access_retries': 10,
-            'extractor_retries': 10,
-            'ignoreerrors': True,
+            'socket_timeout': 60,  # Increased timeout
+            'retries': 15,  # Increased retries
+            'fragment_retries': 15,
+            'file_access_retries': 15,
+            'extractor_retries': 15,
+            'ignoreerrors': False,  # Don't ignore errors for debugging
             'no_color': True,
             'geo_bypass': True,
             'geo_verification_proxy': None,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
             },
             'age_limit': 99,  # Try to bypass age restriction
-            'extractor_retries': 5,
             'skip_download': True,  # We only need the info
             'nocheckcertificate': True,
             'prefer_insecure': True,
@@ -150,15 +157,25 @@ async def download_video(request: DownloadRequest):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             try:
+                print(f"Attempting to extract info from URL: {request.url}")
                 info = ydl.extract_info(request.url, download=False)
                 if info is None:
                     raise HTTPException(status_code=400, detail="Could not extract video information. The video might be private, age-restricted, or not available.")
+                print(f"Successfully extracted info for video: {info.get('title', 'Unknown')}")
             except Exception as e:
                 error_msg = str(e)
+                print(f"Error extracting video info: {error_msg}")
+                
                 if "Sign in to confirm you're not a bot" in error_msg:
                     raise HTTPException(status_code=403, detail="YouTube requires verification. Please try again later or use a different video.")
                 elif "Video unavailable" in error_msg:
                     raise HTTPException(status_code=404, detail="Video is unavailable. It might be private, deleted, or region-restricted.")
+                elif "This video is not available" in error_msg:
+                    raise HTTPException(status_code=404, detail="This video is not available in your region or has been removed.")
+                elif "Video is private" in error_msg:
+                    raise HTTPException(status_code=403, detail="This video is private and cannot be accessed.")
+                elif "Age restricted" in error_msg:
+                    raise HTTPException(status_code=403, detail="This video is age-restricted and cannot be accessed.")
                 else:
                     raise HTTPException(status_code=500, detail=f"Error extracting video info: {error_msg}")
 
