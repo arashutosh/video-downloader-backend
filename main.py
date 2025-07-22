@@ -18,13 +18,26 @@ load_dotenv()
 
 app = FastAPI()
 
+# --- CORS MIDDLEWARE (robust config for local dev) ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://videogetter.netlify.app"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+        "https://videogetter.netlify.app"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Explicit OPTIONS handler for /api/download (for CORS preflight) ---
+from fastapi import Response
+@app.options("/api/download")
+def options_download():
+    return Response(status_code=204)
 
 client = AsyncIOMotorClient(os.getenv("MONGODB_URI", "mongodb://localhost:27017"))
 db = client["video-downloader"]
@@ -111,9 +124,9 @@ async def download_video(request: DownloadRequest):
             raise HTTPException(status_code=400, detail="URL is required")
 
         ydl_opts = {
-            'quiet': False,  # Enable verbose output for debugging
-            'no_warnings': False,  # Show warnings for debugging
-            # 'cookiefile': 'youtube_cookies.txt',  # Comment out cookies for now
+            'quiet': False,  
+            'no_warnings': False,  
+            # 'cookiefile': 'youtube_cookies.txt',
             'extractor_args': {
                 'youtube': {
                     'skip': ['dash', 'hls'],
@@ -246,7 +259,8 @@ async def download_video(request: DownloadRequest):
                 'title': info.get('title'),
                 'formats': formats,
                 'playable_url': playable_url,
-                'video_id': info.get('id', 'unknown')
+                'video_id': info.get('id', 'unknown'),
+                'channel': info.get('channel') or info.get('uploader', ''),
             }
     except HTTPException:
         raise
